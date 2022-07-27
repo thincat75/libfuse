@@ -113,6 +113,8 @@ unsigned get_max_read(struct mount_opts *o);
 void fuse_kern_unmount(const char *mountpoint, int fd);
 int fuse_kern_mount(const char *mountpoint, struct mount_opts *mo);
 
+int curvefs_session_mount(struct fuse_session *se, const char *mountpoint);
+
 int fuse_send_reply_iov_nofree(fuse_req_t req, int error, struct iovec *iov,
 			       int count);
 void fuse_free_req(fuse_req_t req);

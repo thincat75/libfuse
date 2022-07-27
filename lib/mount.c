@@ -557,6 +557,79 @@ void destroy_mount_opts(struct mount_opts *mo)
 	free(mo);
 }
 
+static int curvefs_mount_sys(const char *mnt, struct mount_opts *mo) {
+	char tmp[128];
+	const char *devname = "/dev/fuse";
+	char *source = NULL;
+	char *type = NULL;
+	struct stat stbuf;
+	int res = 0;
+
+	if (!mnt) {
+		fuse_log(FUSE_LOG_ERR, "fuse: missing mountpoint parameter\n");
+		return -1;
+	}
+
+	res = stat(mnt, &stbuf);
+	if (res == -1) {
+		fuse_log(FUSE_LOG_ERR, "fuse: failed to access mountpoint %s: %s\n",
+			mnt, strerror(errno));
+		return -1;
+	}
+	snprintf(tmp, sizeof(tmp),  "rootmode=%o,user_id=%u,group_id=%u",
+		stbuf.st_mode & S_IFMT, getuid(), getgid());
+
+	res = fuse_opt_add_opt(&mo->kernel_opts, tmp);
+	if (res == -1)
+		goto out_close;
+
+	source = malloc((mo->fsname ? strlen(mo->fsname) : 0) +
+			(mo->subtype ? strlen(mo->subtype) : 0) +
+			strlen(devname) + 32);
+
+	type = malloc((mo->subtype ? strlen(mo->subtype) : 0) + 32);
+	if (!type || !source) {
+		fuse_log(FUSE_LOG_ERR, "fuse: failed to allocate memory\n");
+		goto out_close;
+	}
+
+	strcpy(type, mo->blkdev ? "fuseblk" : "fuse");
+	if (mo->subtype) {
+		strcat(type, ".");
+		strcat(type, mo->subtype);
+	}
+	strcpy(source,
+	       mo->fsname ? mo->fsname : (mo->subtype ? mo->subtype : devname));
+
+	res = mount(source, mnt, type, mo->flags, mo->kernel_opts);
+	
+	free(type);
+	free(source);
+
+	return res;
+
+out_close:
+	free(type);
+	free(source);
+	return res;
+}
+
+int curvefs_session_mount(struct fuse_session *se, const char *mountpoint) {
+	int res = -1;
+	char *mnt_opts = NULL;
+
+	if (get_mnt_flag_opts(&mnt_opts, se->mo->flags) == -1)
+		goto out;
+
+	if (se->mo->kernel_opts && fuse_opt_add_opt(&mnt_opts, se->mo->kernel_opts) == -1)
+		goto out;
+
+	res = curvefs_mount_sys(mountpoint, se->mo);
+
+out:
+	free(mnt_opts);
+	return res;
+}
 
 int fuse_kern_mount(const char *mountpoint, struct mount_opts *mo)
 {

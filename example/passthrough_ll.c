@@ -54,7 +54,9 @@
 #include <pthread.h>
 #include <sys/file.h>
 #include <sys/xattr.h>
+#include <sys/mount.h>
 
+#include "fuse_i.h"
 #include "passthrough_helpers.h"
 
 /* We are re-using pointers to our `struct lo_inode` and `struct
@@ -1179,6 +1181,94 @@ static const struct fuse_lowlevel_ops lo_oper = {
 #endif
 	.lseek		= lo_lseek,
 };
+
+static int curvefs_init(int argc, char *argv[]) {
+	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
+	struct fuse_session *se;
+	struct fuse_cmdline_opts opts;
+	struct lo_data lo = { .debug = 0,
+	                      .writeback = 0 };
+	int ret = -1;
+
+	pthread_mutex_init(&lo.mutex, NULL);
+	lo.root.next = lo.root.prev = &lo.root;
+	lo.root.fd = -1;
+	lo.cache = CACHE_NORMAL;
+
+	if (fuse_parse_cmdline(&args, &opts) != 0)
+		return 1;
+
+	if (fuse_opt_parse(&args, &lo, lo_opts, NULL)== -1)
+		return 1;
+
+	lo.debug = opts.debug;
+	lo.root.refcount = 2;
+	if (lo.source) {
+		struct stat stat;
+		int res;
+
+		res = lstat(lo.source, &stat);
+		if (res == -1) {
+			fuse_log(FUSE_LOG_ERR, "failed to stat source (\"%s\"): %m\n",
+				 lo.source);
+			exit(1);
+		}
+		if (!S_ISDIR(stat.st_mode)) {
+			fuse_log(FUSE_LOG_ERR, "source is not a directory\n");
+			exit(1);
+		}
+
+	} else {
+		lo.source = "/";
+	}
+	if (!lo.timeout_set) {
+		switch (lo.cache) {
+		case CACHE_NEVER:
+			lo.timeout = 0.0;
+			break;
+
+		case CACHE_NORMAL:
+			lo.timeout = 1.0;
+			break;
+
+		case CACHE_ALWAYS:
+			lo.timeout = 86400.0;
+			break;
+		}
+	} else if (lo.timeout < 0) {
+		fuse_log(FUSE_LOG_ERR, "timeout is negative (%lf)\n",
+			 lo.timeout);
+		exit(1);
+	}
+
+	lo.root.fd = open(lo.source, O_PATH);
+	if (lo.root.fd == -1) {
+		fuse_log(FUSE_LOG_ERR, "open(\"%s\", O_PATH): %m\n",
+			 lo.source);
+		exit(1);
+	}
+
+	se = fuse_session_new(&args, &lo_oper, sizeof(lo_oper), &lo);
+	if (se == NULL)
+	    goto err_out1;
+
+	if (curvefs_session_mount(se, opts.mountpoint) != 0)
+	    goto err_out3;
+
+	return 0;
+
+err_out3:
+	fuse_remove_signal_handlers(se);
+	fuse_session_destroy(se);
+err_out1:
+	free(opts.mountpoint);
+	fuse_opt_free_args(&args);
+
+	if (lo.root.fd >= 0)
+		close(lo.root.fd);
+
+	return ret ? 1 : 0;
+}
 
 int main(int argc, char *argv[])
 {
